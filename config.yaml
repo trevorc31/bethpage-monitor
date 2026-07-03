@@ -1,0 +1,21 @@
+# Bethpage tee-time monitor -- edit freely, no code changes needed.
+
+# Days/times you want alerts for (ET, 24h clock). Delete a day to ignore it.
+windows:
+  friday:   { start: "15:00", end: "20:30" }   # 3pm -> twilight
+  saturday: { start: "05:00", end: "20:30" }   # any time
+  sunday:   { start: "05:00", end: "09:00" }   # early morning only
+
+# How far ahead the cancellation watch scans (NYS resident window = 7).
+lookahead_days: 7
+resident_advance_days: 7
+
+# Drop-race poll frequency in seconds (5 = aggressive but read-only/safe).
+droprace_poll_seconds: 5
+
+# Leave empty for auto-discovery (recommended). If ForeUp parsing ever breaks,
+# run the Probe workflow, read the IDs from its log, and pin them here, e.g.:
+# schedule_overrides:
+#   black: { schedule_id: "2431" }
+#   red:   { schedule_id: "2432" }
+schedule_overrides:
