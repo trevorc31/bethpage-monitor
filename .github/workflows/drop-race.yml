@@ -1,8 +1,20 @@
 name: drop-race
 on:
   schedule:
-    - cron: "40 22 * * *"
-    - cron: "40 23 * * *"
+    # Four independent attempts spread across the 30 min before 7pm ET.
+    # GitHub cron can silently skip a single trigger (common right after a
+    # workflow is first added) -- staggering makes that far less likely to
+    # cost us the whole window. Only the earliest one that actually starts
+    # does the real sleep+poll; the rest queue behind it (see concurrency
+    # group below) and no-op in ~1s once they see the window has passed.
+    - cron: "20 22 * * *"   # 6:20 pm EDT
+    - cron: "30 22 * * *"   # 6:30 pm EDT
+    - cron: "40 22 * * *"   # 6:40 pm EDT
+    - cron: "50 22 * * *"   # 6:50 pm EDT
+    - cron: "20 23 * * *"   # 6:20 pm EST
+    - cron: "30 23 * * *"   # 6:30 pm EST
+    - cron: "40 23 * * *"   # 6:40 pm EST
+    - cron: "50 23 * * *"   # 6:50 pm EST
   workflow_dispatch: {}
 
 concurrency:
@@ -15,7 +27,7 @@ permissions:
 jobs:
   droprace:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
