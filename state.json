@@ -1,1 +1,39 @@
-{"seen": {}, "discovery": null}
+{
+ "discovery": {
+  "courses": {
+   "black": {
+    "booking_classes": [
+     "2160",
+     "2137",
+     "2141",
+     "2164",
+     "2162",
+     "2143",
+     "2139",
+     "2145"
+    ],
+    "mode": "item",
+    "name": "deferred:black",
+    "schedule_id": "2431"
+   },
+   "red": {
+    "booking_classes": [
+     "2160",
+     "2137",
+     "2141",
+     "2164",
+     "2162",
+     "2143",
+     "2139",
+     "2145"
+    ],
+    "mode": "item",
+    "name": "deferred:red",
+    "schedule_id": "2431"
+   }
+  },
+  "source": "live",
+  "ts": "2026-07-11T12:32:16.009167-04:00"
+ },
+ "seen": {}
+}
