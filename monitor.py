@@ -102,150 +102,86 @@ def _named_courses_from(entries):
     return out
 
 
+def _obj_around(html, pos, span=400):
+    left = html.rfind("{", max(0, pos - span), pos)
+    right = html.find("}", pos, pos + span)
+    return html[left:right] if left != -1 and right != -1 else ""
+
+
+def _name_in_obj(obj):
+    m = re.search('"(?:name|title|label)"\\s*:\\s*"([^"]{2,80})"', obj)
+    return m.group(1) if m else ""
+
+
 def discover(session, config):
-    """Multi-strategy discovery of Bethpage schedule IDs. Prints diagnostics."""
+    """Map Bethpage courses to booking classes on shared schedule 2431.
+    Never hard-fails if the page is reachable: falls back to deferred mode
+    where slots are attributed by per-item course names at runtime."""
     override = config.get("schedule_overrides") or {}
     if override.get("black", {}).get("schedule_id") and override.get("red", {}).get("schedule_id"):
         return {"courses": override, "ts": datetime.now(ET).isoformat(), "source": "config"}
 
-    found, classes = {}, []
-    candidate_ids = ["2431", "2432", "2433", "2434", "2435", "2436", "2437",
-                     "2428", "2429", "2430"]
-
     def note(msg):
         print(f"[probe] {msg}", flush=True)
 
-    # --- Strategy A: mine the booking page HTML deeply -----------------------
-    html = ""
+    # ---- fetch booking page, harvest booking_class id -> name table --------
     try:
         r = session.get(BOOKING_PAGE.format(sched="2431"), headers=HEADERS, timeout=20)
         note(f"A: booking page HTTP {r.status_code}, {len(r.text)} bytes")
-        if r.ok:
-            html = r.text
+        html = r.text if r.ok else ""
     except requests.RequestException as e:
-        note(f"A: booking page fetch failed: {e}")
+        raise RuntimeError(f"booking page unreachable: {e}")
+    if not html:
+        raise RuntimeError("booking page returned no HTML")
 
-    if html:
-        for cm in RX_BCLASS.finditer(html):
-            if cm.group(1) not in classes:
-                classes.append(cm.group(1))
+    cls_names = {}
+    for m in RX_BCLASS.finditer(html):
+        cid = m.group(1)
+        if cid not in cls_names:
+            cls_names[cid] = _name_in_obj(_obj_around(html, m.start()))
+    note(f"A: {len(cls_names)} booking classes found; name table:")
+    for cid, nm in cls_names.items():
+        tag = _course_key(nm) or "-"
+        note(f"A:   class {cid:>6} -> {nm!r} [{tag}]")
 
-        # A1: JSON array under a schedules-like key
-        for key in ("schedules", "teesheets", "courses"):
-            m = re.search('"%s"\\s*:\\s*(\\[.*?\\])\\s*[,}]' % key, html, re.S)
-            if m:
-                try:
-                    got = _named_courses_from(json.loads(m.group(1)))
-                    if got:
-                        found.update(got)
-                        note(f"A1: '{key}' blob -> {sorted(got)}")
-                except json.JSONDecodeError:
-                    note(f"A1: '{key}' blob present but not parseable")
+    # ---- test which classes the anonymous API accepts -----------------------
+    day3 = (datetime.now(ET).date() + timedelta(days=3)).strftime("%m-%d-%Y")
+    accessible = []
+    for cid in cls_names:
+        params = {"time": "all", "date": day3, "holes": "all", "players": "0",
+                  "schedule_id": "2431", "schedule_ids[]": "2431",
+                  "specials_only": "0", "api_key": "no_limits",
+                  "booking_class": cid}
+        try:
+            r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
+            if r.ok:
+                accessible.append(cid)
+        except requests.RequestException:
+            pass
+        time.sleep(0.15)
+    note(f"B: accessible classes (HTTP 200): {accessible}")
 
-        # A2: pair each schedule_id with a course word inside its OWN {...} object
-        if len(set(found) & {"black", "red"}) < 2:
-            for m in RX_SCHEDID.finditer(html):
-                sid = m.group(1)
-                left = html.rfind("{", max(0, m.start() - 600), m.start())
-                right = html.find("}", m.end(), m.end() + 600)
-                if left == -1 or right == -1:
-                    continue
-                key = _course_key(html[left:right])
-                if key and key not in found:
-                    found[key] = {"schedule_id": sid, "name": f"(page obj) {key}"}
-                    note(f"A2: schedule_id {sid} -> '{key}' (same object)")
+    # ---- build course mapping ----------------------------------------------
+    found = {}
+    for key in ("black", "red"):
+        named = [c for c in accessible if _course_key(cls_names.get(c)) == key]
+        if named:
+            found[key] = {"schedule_id": "2431", "booking_classes": named,
+                          "name": cls_names[named[0]], "mode": "class"}
+    if len(found) < 2:
+        # deferred mode: poll every accessible class; item course names decide
+        note("C: class names don't identify courses -> deferred per-item mode")
+        for key in ("black", "red"):
+            found.setdefault(key, {"schedule_id": "2431",
+                                   "booking_classes": accessible or [None],
+                                   "name": f"deferred:{key}", "mode": "item"})
 
-        # A3: raw diagnostics if still stuck
-        if len(set(found) & {"black", "red"}) < 2:
-            ids_in_links = sorted(set(re.findall("booking/%s/(\\d+)" % FACILITY_ID, html)))
-            note(f"A3: ids in links: {ids_in_links}")
-            sched_ids = sorted(set(RX_SCHEDID.findall(html)))
-            note(f"A3: schedule_id values in page: {sched_ids}")
-            for i, m in enumerate(re.finditer("[Bb]lack", html)):
-                if i >= 4:
-                    break
-                seg = html[max(0, m.start() - 110):m.end() + 110]
-                note("A3: 'Black' ctx: " + re.sub("\\s+", " ", seg))
-            for pid in sched_ids + ids_in_links:
-                if pid not in candidate_ids:
-                    candidate_ids.append(pid)
-
-    # --- Strategy C: per-schedule pages, word-boundary matched ----------------
-    if len(set(found) & {"black", "red"}) < 2:
-        for sid in candidate_ids:
-            try:
-                r = session.get(BOOKING_PAGE.format(sched=sid), headers=HEADERS, timeout=15)
-                if not r.ok:
-                    continue
-                m = RX_TITLE_COURSE.search(r.text)
-                if m:
-                    key = m.group(1).lower()
-                    if key not in found:
-                        found[key] = {"schedule_id": sid, "name": f"page {sid}: {m.group(1)}"}
-                        note(f"C: page {sid} -> {m.group(1)}")
-            except requests.RequestException:
-                continue
-            time.sleep(0.3)
-
-    # --- Strategy D: times API, iterating booking classes; dump structure ----
-    if len(set(found) & {"black", "red"}) < 2:
-        today = datetime.now(ET).date()
-        pairs = {}          # (schedule_id_in_item, course_word) -> name
-        hit_bc = None
-        for bc in [None] + classes:
-            got_data = None
-            for off in range(1, 8):
-                day = (today + timedelta(days=off)).strftime("%m-%d-%Y")
-                params = {"time": "all", "date": day, "holes": "all",
-                          "players": "0", "schedule_id": "2431",
-                          "schedule_ids[]": "2431", "specials_only": "0",
-                          "api_key": "no_limits"}
-                if bc:
-                    params["booking_class"] = bc
-                try:
-                    r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
-                    if off == 1:
-                        body = re.sub(r"\s+", " ", r.text[:160])
-                        note(f"D: bc={bc} HTTP {r.status_code}: {body}")
-                    data = r.json() if r.ok else None
-                except (requests.RequestException, ValueError):
-                    data = None
-                if isinstance(data, list) and data:
-                    got_data = data
-                    break
-                time.sleep(0.25)
-            if got_data:
-                hit_bc = bc
-                note("D: first item structure: " + json.dumps(got_data[0])[:400])
-                for it in got_data:
-                    if not isinstance(it, dict):
-                        continue
-                    nm = str(it.get("course_name") or it.get("schedule_name") or "")
-                    key = _course_key(nm)
-                    sid = str(it.get("schedule_id") or "2431")
-                    if key:
-                        pairs[(sid, key)] = nm
-                break
-        if pairs:
-            note(f"D: (schedule_id, course) pairs seen: {sorted(pairs)}")
-            for (sid, key), nm in pairs.items():
-                found.setdefault(key, {"schedule_id": sid, "name": nm})
-        if hit_bc is not None:
-            classes.insert(0, classes.pop(classes.index(hit_bc))) if hit_bc in classes else None
-            note(f"D: working booking_class = {hit_bc}")
-
-    note(f"RESULT: {json.dumps(found)}  booking_classes={classes[:6]}")
-
-    if "black" not in found or "red" not in found:
-        raise RuntimeError(
-            "Discovery incomplete. Diagnostics above show everything found. "
-            "Paste this whole log back to Claude, or pin ids in config.yaml "
-            "under schedule_overrides."
-        )
-    for c in found.values():
-        c["booking_classes"] = classes[:6]
-    return {"courses": {k: found[k] for k in ("black", "red")},
-            "ts": datetime.now(ET).isoformat(), "source": "live"}
+    note(f"RESULT: {json.dumps(found)}")
+    if not accessible:
+        note("WARNING: no anonymously accessible booking class; if the watch "
+             "workflow never alerts even when the site shows times, we will "
+             "need an authenticated session cookie.")
+    return {"courses": found, "ts": datetime.now(ET).isoformat(), "source": "live"}
 
 
 def get_discovery(session, config, state):
@@ -264,37 +200,32 @@ def get_discovery(session, config, state):
 # ----------------------------------------------------------------------------
 
 def fetch_times(session, schedule_id, booking_classes, day: date):
-    """Return list of slot dicts for one course/day. Empty list = nothing open."""
+    """Merged availability across the given booking classes for one day."""
     datestr = day.strftime("%m-%d-%Y")
-    attempts = list(booking_classes or []) + [None]
-    for bc in attempts:
+    merged, seen_keys = [], set()
+    for bc in (booking_classes or [None]):
         params = {
-            "time": "all",
-            "date": datestr,
-            "holes": "all",
-            "players": "0",
-            "schedule_id": schedule_id,
-            "schedule_ids[]": schedule_id,
-            "specials_only": "0",
-            "api_key": "no_limits",
+            "time": "all", "date": datestr, "holes": "all", "players": "0",
+            "schedule_id": schedule_id, "schedule_ids[]": schedule_id,
+            "specials_only": "0", "api_key": "no_limits",
         }
         if bc:
             params["booking_class"] = bc
         try:
             r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
-        except requests.RequestException:
-            continue
-        if not r.ok:
-            continue
-        try:
-            data = r.json()
-        except ValueError:
-            continue
-        if isinstance(data, list) and data:
-            return data
-        # empty list is a valid "no availability" answer only if request was accepted;
-        # still try next booking_class in case this class is blocked from seeing times
-    return []
+            data = r.json() if r.ok else None
+        except (requests.RequestException, ValueError):
+            data = None
+        if isinstance(data, list):
+            for it in data:
+                if not isinstance(it, dict):
+                    continue
+                k = (it.get("time"), it.get("course_name") or it.get("schedule_name"))
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    merged.append(it)
+        time.sleep(0.1)
+    return merged
 
 
 def parse_slot(raw, course_key):
@@ -340,10 +271,11 @@ def scan(session, config, state, days_ahead):
     for ckey in ("black", "red"):
         c = courses.get(ckey)
         if c:
-            by_sched.setdefault(str(c["schedule_id"]), []).append(ckey)
+            gk = (str(c["schedule_id"]), tuple(c.get("booking_classes") or []))
+            by_sched.setdefault(gk, []).append(ckey)
 
-    for sched_id, ckeys in by_sched.items():
-        bclasses = courses[ckeys[0]].get("booking_classes")
+    for (sched_id, bclasses_t), ckeys in by_sched.items():
+        bclasses = list(bclasses_t)
         for offset in days_ahead:
             day = today + timedelta(days=offset)
             if day.strftime("%A").lower() not in windows:
