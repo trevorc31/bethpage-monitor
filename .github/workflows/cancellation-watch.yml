@@ -1,0 +1,46 @@
+name: cancellation-watch
+on:
+  schedule:
+    - cron: "*/15 10-23 * * *"
+    - cron: "*/15 0-3 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: bethpage-state
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -q requests pyyaml
+      - name: guard ET hours
+        run: |
+          H=$(TZ=America/New_York date +%H)
+          if [ "$H" -lt 6 ] || [ "$H" -ge 22 ]; then
+            echo "outside 6am-10pm ET, skipping"; echo "SKIP=1" >> $GITHUB_ENV
+          fi
+      - name: run watch pass
+        if: env.SKIP != '1'
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          SMS_EMAIL: ${{ secrets.SMS_EMAIL }}
+        run: python monitor.py watch
+      - name: persist state
+        if: env.SKIP != '1'
+        run: |
+          git config user.name "tee-bot"
+          git config user.email "tee-bot@users.noreply.github.com"
+          git add state.json || true
+          git diff --cached --quiet || git commit -m "state: watch $(date -u +%F_%H%M)"
+          git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+          git push || true
