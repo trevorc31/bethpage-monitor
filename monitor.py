@@ -77,17 +77,28 @@ def save_state(state):
 # discovery: schedule IDs + booking classes, parsed from the booking page HTML
 # ----------------------------------------------------------------------------
 
+COURSE_WORD = re.compile("\\b(black|red|blue|green|yellow)\\b", re.I)
+RX_BCLASS = re.compile("\"booking_class_id\"\\s*:\\s*\"?(\\d+)\"?")
+RX_SCHEDID = re.compile("\"schedule_id\"\\s*:\\s*\"?(\\d+)\"?")
+RX_TITLE_COURSE = re.compile(
+    "(?:<title>[^<]*?|\"schedule_name\"\\s*:\\s*\"[^\"]*?|<h\\d[^>]*>[^<]*?)"
+    "\\b(Black|Red|Blue|Green|Yellow)\\b", re.I)
+
+
+def _course_key(name):
+    m = COURSE_WORD.search(str(name or ""))
+    return m.group(1).lower() if m else None
+
+
 def _named_courses_from(entries):
     out = {}
     for e in entries:
-        name = str(e.get("name") or e.get("title") or e.get("course_name") or "")
+        name = str(e.get("name") or e.get("title") or e.get("course_name")
+                   or e.get("schedule_name") or "")
         sid = str(e.get("schedule_id") or e.get("id") or e.get("teesheet_id") or "")
-        low = name.lower()
-        if not sid or not name:
-            continue
-        for key in ("black", "red", "blue", "green", "yellow"):
-            if key in low:
-                out.setdefault(key, {"schedule_id": sid, "name": name})
+        key = _course_key(name)
+        if sid and key:
+            out.setdefault(key, {"schedule_id": sid, "name": name})
     return out
 
 
@@ -97,17 +108,14 @@ def discover(session, config):
     if override.get("black", {}).get("schedule_id") and override.get("red", {}).get("schedule_id"):
         return {"courses": override, "ts": datetime.now(ET).isoformat(), "source": "config"}
 
-    found = {}          # course key -> {schedule_id, name}
-    classes = []        # booking_class ids
+    found, classes = {}, []
     candidate_ids = ["2431", "2432", "2433", "2434", "2435", "2436", "2437",
                      "2428", "2429", "2430"]
-    diag = []
 
     def note(msg):
-        diag.append(msg)
         print(f"[probe] {msg}", flush=True)
 
-    # --- Strategy A: embedded JSON in the booking page HTML -----------------
+    # --- Strategy A: mine the booking page HTML deeply -----------------------
     html = ""
     try:
         r = session.get(BOOKING_PAGE.format(sched="2431"), headers=HEADERS, timeout=20)
@@ -116,73 +124,77 @@ def discover(session, config):
             html = r.text
     except requests.RequestException as e:
         note(f"A: booking page fetch failed: {e}")
+
     if html:
-        m = re.search(r'"schedules"\s*:\s*(\[.*?\])\s*[,}]', html, re.S)
-        if m:
-            try:
-                found.update(_named_courses_from(json.loads(m.group(1))))
-                note(f"A: embedded schedules -> {sorted(found)}")
-            except json.JSONDecodeError:
-                note("A: embedded schedules blob found but not valid JSON")
-        for cm in re.finditer(r'"booking_class_id"\s*:\s*"?(\d+)"?', html):
+        for cm in RX_BCLASS.finditer(html):
             if cm.group(1) not in classes:
                 classes.append(cm.group(1))
-        # harvest any extra schedule ids referenced anywhere in the page
-        page_ids = sorted(set(re.findall(r'booking/%s/(\d+)' % FACILITY_ID, html)))
-        if page_ids:
-            note(f"A: schedule ids referenced in page: {page_ids}")
-            for pid in page_ids:
+
+        # A1: JSON array under a schedules-like key
+        for key in ("schedules", "teesheets", "courses"):
+            m = re.search('"%s"\\s*:\\s*(\\[.*?\\])\\s*[,}]' % key, html, re.S)
+            if m:
+                try:
+                    got = _named_courses_from(json.loads(m.group(1)))
+                    if got:
+                        found.update(got)
+                        note(f"A1: '{key}' blob -> {sorted(got)}")
+                except json.JSONDecodeError:
+                    note(f"A1: '{key}' blob present but not parseable")
+
+        # A2: pair each schedule_id with a course word inside its OWN {...} object
+        if len(set(found) & {"black", "red"}) < 2:
+            for m in RX_SCHEDID.finditer(html):
+                sid = m.group(1)
+                left = html.rfind("{", max(0, m.start() - 600), m.start())
+                right = html.find("}", m.end(), m.end() + 600)
+                if left == -1 or right == -1:
+                    continue
+                key = _course_key(html[left:right])
+                if key and key not in found:
+                    found[key] = {"schedule_id": sid, "name": f"(page obj) {key}"}
+                    note(f"A2: schedule_id {sid} -> '{key}' (same object)")
+
+        # A3: raw diagnostics if still stuck
+        if len(set(found) & {"black", "red"}) < 2:
+            ids_in_links = sorted(set(re.findall("booking/%s/(\\d+)" % FACILITY_ID, html)))
+            note(f"A3: ids in links: {ids_in_links}")
+            sched_ids = sorted(set(RX_SCHEDID.findall(html)))
+            note(f"A3: schedule_id values in page: {sched_ids}")
+            for i, m in enumerate(re.finditer("[Bb]lack", html)):
+                if i >= 4:
+                    break
+                seg = html[max(0, m.start() - 110):m.end() + 110]
+                note("A3: 'Black' ctx: " + re.sub("\\s+", " ", seg))
+            for pid in sched_ids + ids_in_links:
                 if pid not in candidate_ids:
                     candidate_ids.append(pid)
 
-    # --- Strategy B: course-config API endpoints -----------------------------
-    if len({k for k in found} & {"black", "red"}) < 2:
-        for url in (f"{BASE}/api/booking/courses/{FACILITY_ID}",
-                    f"{BASE}/api/booking/groups?course_id={FACILITY_ID}"):
-            try:
-                r = session.get(url, headers=HEADERS, timeout=15)
-                note(f"B: GET {url.split('index.php')[1]} -> HTTP {r.status_code}")
-                if not r.ok:
-                    continue
-                data = r.json()
-            except (requests.RequestException, ValueError):
-                continue
-            entries = data if isinstance(data, list) else \
-                (data.get("schedules") or data.get("courses") or [])
-            got = _named_courses_from(entries)
-            if got:
-                found.update(got)
-                note(f"B: api config -> {sorted(got)}")
-                break
-
-    # --- Strategy C: per-schedule booking pages often title the course -------
-    if len({k for k in found} & {"black", "red"}) < 2:
+    # --- Strategy C: per-schedule pages, word-boundary matched ----------------
+    if len(set(found) & {"black", "red"}) < 2:
         for sid in candidate_ids:
             try:
                 r = session.get(BOOKING_PAGE.format(sched=sid), headers=HEADERS, timeout=15)
                 if not r.ok:
                     continue
-                m = re.search(
-                    r'(?:<title>|"schedule_name"\s*:\s*"|<h\d[^>]*>)\s*'
-                    r'([^<"\n]{0,60}?(Black|Red|Blue|Green|Yellow)[^<"\n]{0,40})',
-                    r.text, re.I)
+                m = RX_TITLE_COURSE.search(r.text)
                 if m:
-                    key = m.group(2).lower()
+                    key = m.group(1).lower()
                     if key not in found:
-                        found[key] = {"schedule_id": sid, "name": m.group(1).strip()}
-                        note(f"C: page {sid} -> {m.group(1).strip()!r}")
+                        found[key] = {"schedule_id": sid, "name": f"page {sid}: {m.group(1)}"}
+                        note(f"C: page {sid} -> {m.group(1)}")
             except requests.RequestException:
                 continue
             time.sleep(0.3)
 
-    # --- Strategy D: brute-scan the times API; items carry course names ------
-    if len({k for k in found} & {"black", "red"}) < 2:
+    # --- Strategy D: brute-scan times API; log first raw response ------------
+    if len(set(found) & {"black", "red"}) < 2:
         today = datetime.now(ET).date()
-        empty_but_valid = []
+        empty_but_valid, first_logged = [], False
         for sid in candidate_ids:
             if sid in {c["schedule_id"] for c in found.values()}:
                 continue
-            named = False
+            got_any, data = False, None
             for off in range(1, 8):
                 day = (today + timedelta(days=off)).strftime("%m-%d-%Y")
                 params = {"time": "all", "date": day, "holes": "all",
@@ -193,25 +205,29 @@ def discover(session, config):
                     params["booking_class"] = classes[0]
                 try:
                     r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
+                    if not first_logged:
+                        body = re.sub("\\s+", " ", r.text[:200])
+                        note(f"D: first raw response sid={sid} HTTP {r.status_code}: {body}")
+                        first_logged = True
                     data = r.json() if r.ok else None
                 except (requests.RequestException, ValueError):
                     data = None
                 if isinstance(data, list) and data:
-                    got = _named_courses_from(data)
+                    got = _named_courses_from(
+                        [{**it, "schedule_id": it.get("schedule_id") or sid}
+                         for it in data if isinstance(it, dict)])
+                    for k, v in got.items():
+                        v["schedule_id"] = sid
+                        found.setdefault(k, v)
                     if got:
-                        for k, v in got.items():
-                            v["schedule_id"] = sid
-                            found.setdefault(k, v)
                         note(f"D: times sid={sid} -> {list(got)}")
-                    named = True
+                    got_any = True
                     break
-                if isinstance(data, list):
-                    named = named or False
                 time.sleep(0.25)
-            if not named and isinstance(data, list):
+            if not got_any and isinstance(data, list):
                 empty_but_valid.append(sid)
         if empty_but_valid:
-            note(f"D: valid schedules with zero availability all week: {empty_but_valid}")
+            note(f"D: valid but zero availability all week: {empty_but_valid}")
 
     note(f"RESULT: {json.dumps(found)}  booking_classes={classes[:6]}")
 
