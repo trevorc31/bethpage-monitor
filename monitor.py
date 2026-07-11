@@ -187,47 +187,52 @@ def discover(session, config):
                 continue
             time.sleep(0.3)
 
-    # --- Strategy D: brute-scan times API; log first raw response ------------
+    # --- Strategy D: times API, iterating booking classes; dump structure ----
     if len(set(found) & {"black", "red"}) < 2:
         today = datetime.now(ET).date()
-        empty_but_valid, first_logged = [], False
-        for sid in candidate_ids:
-            if sid in {c["schedule_id"] for c in found.values()}:
-                continue
-            got_any, data = False, None
+        pairs = {}          # (schedule_id_in_item, course_word) -> name
+        hit_bc = None
+        for bc in [None] + classes:
+            got_data = None
             for off in range(1, 8):
                 day = (today + timedelta(days=off)).strftime("%m-%d-%Y")
                 params = {"time": "all", "date": day, "holes": "all",
-                          "players": "0", "schedule_id": sid,
-                          "schedule_ids[]": sid, "specials_only": "0",
+                          "players": "0", "schedule_id": "2431",
+                          "schedule_ids[]": "2431", "specials_only": "0",
                           "api_key": "no_limits"}
-                if classes:
-                    params["booking_class"] = classes[0]
+                if bc:
+                    params["booking_class"] = bc
                 try:
                     r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
-                    if not first_logged:
-                        body = re.sub("\\s+", " ", r.text[:200])
-                        note(f"D: first raw response sid={sid} HTTP {r.status_code}: {body}")
-                        first_logged = True
+                    if off == 1:
+                        body = re.sub(r"\s+", " ", r.text[:160])
+                        note(f"D: bc={bc} HTTP {r.status_code}: {body}")
                     data = r.json() if r.ok else None
                 except (requests.RequestException, ValueError):
                     data = None
                 if isinstance(data, list) and data:
-                    got = _named_courses_from(
-                        [{**it, "schedule_id": it.get("schedule_id") or sid}
-                         for it in data if isinstance(it, dict)])
-                    for k, v in got.items():
-                        v["schedule_id"] = sid
-                        found.setdefault(k, v)
-                    if got:
-                        note(f"D: times sid={sid} -> {list(got)}")
-                    got_any = True
+                    got_data = data
                     break
                 time.sleep(0.25)
-            if not got_any and isinstance(data, list):
-                empty_but_valid.append(sid)
-        if empty_but_valid:
-            note(f"D: valid but zero availability all week: {empty_but_valid}")
+            if got_data:
+                hit_bc = bc
+                note("D: first item structure: " + json.dumps(got_data[0])[:400])
+                for it in got_data:
+                    if not isinstance(it, dict):
+                        continue
+                    nm = str(it.get("course_name") or it.get("schedule_name") or "")
+                    key = _course_key(nm)
+                    sid = str(it.get("schedule_id") or "2431")
+                    if key:
+                        pairs[(sid, key)] = nm
+                break
+        if pairs:
+            note(f"D: (schedule_id, course) pairs seen: {sorted(pairs)}")
+            for (sid, key), nm in pairs.items():
+                found.setdefault(key, {"schedule_id": sid, "name": nm})
+        if hit_bc is not None:
+            classes.insert(0, classes.pop(classes.index(hit_bc))) if hit_bc in classes else None
+            note(f"D: working booking_class = {hit_bc}")
 
     note(f"RESULT: {json.dumps(found)}  booking_classes={classes[:6]}")
 
@@ -261,7 +266,7 @@ def get_discovery(session, config, state):
 def fetch_times(session, schedule_id, booking_classes, day: date):
     """Return list of slot dicts for one course/day. Empty list = nothing open."""
     datestr = day.strftime("%m-%d-%Y")
-    attempts = [None] + list(booking_classes or [])
+    attempts = list(booking_classes or []) + [None]
     for bc in attempts:
         params = {
             "time": "all",
@@ -322,22 +327,37 @@ def slot_key(slot):
 
 
 def scan(session, config, state, days_ahead):
-    """One full pass over both courses. Returns list of NEW slots (not yet alerted)."""
+    """One full pass. Handles both layouts: courses on separate schedules, or
+    all courses on one shared schedule distinguished per-slot by course name."""
     disc = get_discovery(session, config, state)
     courses = disc["courses"]
     windows = config["windows"]
     today = datetime.now(ET).date()
     new_slots = []
 
+    # group course keys by schedule id (shared schedule -> one fetch, split by name)
+    by_sched = {}
     for ckey in ("black", "red"):
         c = courses.get(ckey)
-        if not c:
-            continue
+        if c:
+            by_sched.setdefault(str(c["schedule_id"]), []).append(ckey)
+
+    for sched_id, ckeys in by_sched.items():
+        bclasses = courses[ckeys[0]].get("booking_classes")
         for offset in days_ahead:
             day = today + timedelta(days=offset)
             if day.strftime("%A").lower() not in windows:
                 continue
-            for raw in fetch_times(session, c["schedule_id"], c.get("booking_classes"), day):
+            for raw in fetch_times(session, sched_id, bclasses, day):
+                if not isinstance(raw, dict):
+                    continue
+                item_key = _course_key(raw.get("course_name") or raw.get("schedule_name"))
+                if len(ckeys) == 1 and item_key is None:
+                    ckey = ckeys[0]          # dedicated schedule, no name needed
+                elif item_key in ckeys:
+                    ckey = item_key          # shared schedule, name decides
+                else:
+                    continue                 # slot belongs to a course we don't track
                 slot = parse_slot(raw, ckey)
                 if not slot or slot["spots"] < 1 or not in_window(slot, windows):
                     continue
@@ -347,7 +367,7 @@ def scan(session, config, state, days_ahead):
                     slot["new_group"] = slot["spots"] >= 2 and prev_spots < 2
                     new_slots.append(slot)
                 state["seen"][k] = slot["spots"]
-            time.sleep(0.4)  # be polite between per-day calls
+            time.sleep(0.4)
     return new_slots
 
 
