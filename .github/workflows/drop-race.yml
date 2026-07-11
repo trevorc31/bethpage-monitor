@@ -1,0 +1,38 @@
+name: drop-race
+on:
+  schedule:
+    - cron: "40 22 * * *"
+    - cron: "40 23 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: bethpage-state
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  droprace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -q requests pyyaml
+      - name: run drop race
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          SMS_EMAIL: ${{ secrets.SMS_EMAIL }}
+        run: python monitor.py droprace
+      - name: persist state
+        run: |
+          git config user.name "tee-bot"
+          git config user.email "tee-bot@users.noreply.github.com"
+          git add state.json || true
+          git diff --cached --quiet || git commit -m "state: drop-race $(date -u +%F_%H%M)"
+          git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+          git push || true
