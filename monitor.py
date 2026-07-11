@@ -376,7 +376,7 @@ def run_droprace(config, state, session):
     if now > drop + timedelta(minutes=10):
         drop += timedelta(days=1)
     warm = drop - timedelta(seconds=30)
-    if warm - now > timedelta(minutes=25):
+    if warm - now > timedelta(minutes=42):
         print(f"not within drop window (now {now:%H:%M} ET); exiting to save minutes")
         return
     # the day that unlocks at this drop: resident window = 7 days ahead
