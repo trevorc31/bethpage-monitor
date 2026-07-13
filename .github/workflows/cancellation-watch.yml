@@ -1,6 +1,7 @@
 name: cancellation-watch
 on:
   schedule:
+    # every 15 min; hours chosen to span 6am-10pm ET across EDT/EST.
     - cron: "*/15 10-23 * * *"
     - cron: "*/15 0-3 * * *"
   workflow_dispatch: {}
@@ -34,6 +35,8 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           SMS_EMAIL: ${{ secrets.SMS_EMAIL }}
+          FOREUP_COOKIE: ${{ secrets.FOREUP_COOKIE }}
+          FOREUP_JWT: ${{ secrets.FOREUP_JWT }}
         run: python monitor.py watch
       - name: persist state
         if: env.SKIP != '1'
