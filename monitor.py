@@ -46,6 +46,11 @@ HEADERS = {
 _cookie = os.environ.get("FOREUP_COOKIE", "").strip()
 if _cookie:
     HEADERS["Cookie"] = _cookie
+_jwt = os.environ.get("FOREUP_JWT", "").strip()
+if _jwt:
+    if not _jwt.lower().startswith("bearer"):
+        _jwt = "Bearer " + _jwt
+    HEADERS["X-Authorization"] = _jwt
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(ROOT, "state.json")
@@ -130,6 +135,9 @@ def discover(session, config):
 
     def note(msg):
         print(f"[probe] {msg}", flush=True)
+
+    note(f"auth: cookie={'present(%d chars)' % len(_cookie) if _cookie else 'NOT SET'}, "
+         f"jwt={'present(%d chars)' % len(_jwt) if _jwt else 'NOT SET'}")
 
     # ---- fetch booking page, harvest booking_class id -> name table --------
     try:
