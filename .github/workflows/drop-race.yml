@@ -39,6 +39,8 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           SMS_EMAIL: ${{ secrets.SMS_EMAIL }}
+          FOREUP_COOKIE: ${{ secrets.FOREUP_COOKIE }}
+          FOREUP_JWT: ${{ secrets.FOREUP_JWT }}
         run: python monitor.py droprace
       - name: persist state
         run: |
