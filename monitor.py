@@ -41,6 +41,12 @@ HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
 }
 
+# Optional authenticated session: paste your browser's ForeUp cookie into the
+# FOREUP_COOKIE repo secret and availability requests run with your login.
+_cookie = os.environ.get("FOREUP_COOKIE", "").strip()
+if _cookie:
+    HEADERS["Cookie"] = _cookie
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(ROOT, "state.json")
 CONFIG_PATH = os.path.join(ROOT, "config.yaml")
@@ -78,6 +84,7 @@ def save_state(state):
 # ----------------------------------------------------------------------------
 
 COURSE_WORD = re.compile("\\b(black|red|blue|green|yellow)\\b", re.I)
+TRACKED = ("black", "red", "blue")
 RX_BCLASS = re.compile("\"booking_class_id\"\\s*:\\s*\"?(\\d+)\"?")
 RX_SCHEDID = re.compile("\"schedule_id\"\\s*:\\s*\"?(\\d+)\"?")
 RX_TITLE_COURSE = re.compile(
@@ -163,15 +170,15 @@ def discover(session, config):
 
     # ---- build course mapping ----------------------------------------------
     found = {}
-    for key in ("black", "red"):
+    for key in TRACKED:
         named = [c for c in accessible if _course_key(cls_names.get(c)) == key]
         if named:
             found[key] = {"schedule_id": "2431", "booking_classes": named,
                           "name": cls_names[named[0]], "mode": "class"}
-    if len(found) < 2:
+    if len(found) < len(TRACKED):
         # deferred mode: poll every accessible class; item course names decide
         note("C: class names don't identify courses -> deferred per-item mode")
-        for key in ("black", "red"):
+        for key in TRACKED:
             found.setdefault(key, {"schedule_id": "2431",
                                    "booking_classes": accessible or [None],
                                    "name": f"deferred:{key}", "mode": "item"})
@@ -188,7 +195,8 @@ def get_discovery(session, config, state):
     d = state.get("discovery")
     if d:
         age_days = (datetime.now(ET) - datetime.fromisoformat(d["ts"])).days
-        if age_days < 7:
+        have = set((d.get("courses") or {}).keys())
+        if age_days < 7 and set(TRACKED) <= have:
             return d
     d = discover(session, config)
     state["discovery"] = d
@@ -258,30 +266,31 @@ def slot_key(slot):
 
 
 def scan(session, config, state, days_ahead):
-    """One full pass. Handles both layouts: courses on separate schedules, or
-    all courses on one shared schedule distinguished per-slot by course name.
-    Logs a diagnostic summary so quiet passes are distinguishable from blind ones."""
+    """One full pass over all tracked courses with per-course windows."""
     disc = get_discovery(session, config, state)
-    courses = disc["courses"]
-    windows = config["windows"]
+    dcourses = disc["courses"]
+    ccfg = config["courses"]
+    tracked = [k for k in ccfg if k in dcourses]
     today = datetime.now(ET).date()
     new_slots = []
 
-    n_raw, n_named, n_window = 0, {"black": 0, "red": 0, "other": 0}, 0
+    n_raw, n_window = 0, 0
+    n_named = {k: 0 for k in tracked}
+    n_named["other"] = 0
     sample_logged = False
 
     by_sched = {}
-    for ckey in ("black", "red"):
-        c = courses.get(ckey)
-        if c:
-            gk = (str(c["schedule_id"]), tuple(c.get("booking_classes") or []))
-            by_sched.setdefault(gk, []).append(ckey)
+    for ckey in tracked:
+        c = dcourses[ckey]
+        gk = (str(c["schedule_id"]), tuple(c.get("booking_classes") or []))
+        by_sched.setdefault(gk, []).append(ckey)
 
     for (sched_id, bclasses_t), ckeys in by_sched.items():
         bclasses = list(bclasses_t)
         for offset in days_ahead:
             day = today + timedelta(days=offset)
-            if day.strftime("%A").lower() not in windows:
+            dayname = day.strftime("%A").lower()
+            if not any(dayname in ccfg[k]["windows"] for k in ckeys):
                 continue
             for raw in fetch_times(session, sched_id, bclasses, day):
                 if not isinstance(raw, dict):
@@ -291,7 +300,8 @@ def scan(session, config, state, days_ahead):
                     print("[scan] sample raw item: " + json.dumps(raw)[:400], flush=True)
                     sample_logged = True
                 item_key = _course_key(raw.get("course_name") or raw.get("schedule_name"))
-                n_named[item_key if item_key in ("black", "red") else "other"] += 1
+                n_named[item_key if item_key in n_named else "other"] = \
+                    n_named.get(item_key if item_key in n_named else "other", 0) + 1
                 if len(ckeys) == 1 and item_key is None:
                     ckey = ckeys[0]
                 elif item_key in ckeys:
@@ -301,7 +311,7 @@ def scan(session, config, state, days_ahead):
                 slot = parse_slot(raw, ckey)
                 if not slot or slot["spots"] < 1:
                     continue
-                if not in_window(slot, windows):
+                if not in_window(slot, ccfg[ckey]["windows"]):
                     continue
                 n_window += 1
                 k = slot_key(slot)
@@ -312,8 +322,8 @@ def scan(session, config, state, days_ahead):
                 state["seen"][k] = slot["spots"]
             time.sleep(0.4)
 
-    print(f"[scan] raw slots seen: {n_raw} "
-          f"(black {n_named['black']}, red {n_named['red']}, other {n_named['other']}) | "
+    counts = ", ".join(f"{k} {v}" for k, v in n_named.items())
+    print(f"[scan] raw slots seen: {n_raw} ({counts}) | "
           f"in your windows: {n_window} | new since last pass: {len(new_slots)}", flush=True)
     return new_slots
 
@@ -345,17 +355,17 @@ def alert(config, state, new_slots):
         return
     email_to = [os.environ["ALERT_EMAIL"]]
     sms_to = os.environ.get("SMS_EMAIL")
+    ccfg = config.get("courses", {})
 
-    by_course = {"black": [], "red": []}
+    by_course = {}
     for s in sorted(new_slots, key=lambda x: x["dt"]):
-        by_course[s["course"]].append(s)
+        by_course.setdefault(s["course"], []).append(s)
 
     for ckey, slots in by_course.items():
-        if not slots:
-            continue
+        channels = ccfg.get(ckey, {}).get("alerts", ["email"])
         lines = []
         for s in slots:
-            star = "*" if s["weekday"] in ("Fri", "Sat") else ""
+            star = "*" if s["weekday"] in ("Fri", "Sat", "Sun") else ""
             grp = " (2-4 spot!)" if s["spots"] >= 2 else ""
             lines.append(
                 f'{star}{ckey.upper()} {s["weekday"]} {s["dt"].strftime("%-m/%-d")} '
@@ -365,13 +375,12 @@ def alert(config, state, new_slots):
         subject = f"[TEE] {ckey.upper()}: {len(slots)} opening{'s' if len(slots)!=1 else ''}"
         body = "\n".join(lines) + f"\n\nBook: {link}\n"
 
-        # email always
-        send_email(config, email_to, subject, body)
-        # SMS only for Black
-        if ckey == "black" and sms_to:
+        if "email" in channels:
+            send_email(config, email_to, subject, body)
+        if "text" in channels and sms_to:
             sms_body = "\n".join(lines[:4]) + f"\n{link}"
             send_email(config, [sms_to], "", sms_body)
-        print(f"alerted {ckey}: {len(slots)} slots")
+        print(f"alerted {ckey}: {len(slots)} slots via {channels}", flush=True)
 
 
 # ----------------------------------------------------------------------------
@@ -397,7 +406,8 @@ def run_droprace(config, state, session):
     # the day that unlocks at this drop: resident window = 7 days ahead
     target_offset = config.get("resident_advance_days", 7)
     target_day = (drop.date() + timedelta(days=target_offset))
-    if target_day.strftime("%A").lower() not in config["windows"]:
+    tday = target_day.strftime("%A").lower()
+    if not any(tday in c["windows"] for c in config["courses"].values()):
         # nothing we care about unlocks tonight, but cancellations spike at drop
         # time too, so do a couple of full passes and get out
         print(f"target day {target_day} not in windows; light pass only")
