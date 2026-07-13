@@ -1,21 +1,41 @@
 # Bethpage tee-time monitor -- edit freely, no code changes needed.
+# Each course has its own alert channels and time windows (ET, 24h clock).
+# Delete a day line to ignore that day for that course.
 
-# Days/times you want alerts for (ET, 24h clock). Delete a day to ignore it.
-windows:
-  friday:   { start: "15:00", end: "20:30" }   # 3pm -> twilight
-  saturday: { start: "05:00", end: "20:30" }   # any time
-  sunday:   { start: "05:00", end: "09:00" }   # early morning only
+courses:
+  black:
+    alerts: [text, email]
+    windows:
+      monday:    { start: "06:00", end: "18:00" }
+      tuesday:   { start: "06:00", end: "18:00" }
+      wednesday: { start: "06:00", end: "18:00" }
+      thursday:  { start: "06:00", end: "18:00" }
+      friday:    { start: "06:00", end: "18:00" }
+      saturday:  { start: "06:00", end: "18:00" }
+      sunday:    { start: "06:00", end: "18:00" }
+
+  red:
+    alerts: [email]
+    windows:
+      friday:   { start: "08:00", end: "17:00" }
+      saturday: { start: "08:00", end: "17:00" }
+      sunday:   { start: "08:00", end: "13:30" }
+
+  blue:
+    alerts: [email]
+    windows:
+      friday:   { start: "08:00", end: "17:00" }
+      saturday: { start: "08:00", end: "17:00" }
+      sunday:   { start: "08:00", end: "13:30" }
 
 # How far ahead the cancellation watch scans (NYS resident window = 7).
 lookahead_days: 7
 resident_advance_days: 7
 
-# Drop-race poll frequency in seconds (5 = aggressive but read-only/safe).
+# Drop-race poll frequency in seconds.
 droprace_poll_seconds: 5
 
-# Leave empty for auto-discovery (recommended). If ForeUp parsing ever breaks,
-# run the Probe workflow, read the IDs from its log, and pin them here, e.g.:
+# Leave empty for auto-discovery. To pin manually:
 # schedule_overrides:
-#   black: { schedule_id: "2431" }
-#   red:   { schedule_id: "2432" }
+#   black: { schedule_id: "2431", booking_classes: ["1234"] }
 schedule_overrides:
