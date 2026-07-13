@@ -259,14 +259,17 @@ def slot_key(slot):
 
 def scan(session, config, state, days_ahead):
     """One full pass. Handles both layouts: courses on separate schedules, or
-    all courses on one shared schedule distinguished per-slot by course name."""
+    all courses on one shared schedule distinguished per-slot by course name.
+    Logs a diagnostic summary so quiet passes are distinguishable from blind ones."""
     disc = get_discovery(session, config, state)
     courses = disc["courses"]
     windows = config["windows"]
     today = datetime.now(ET).date()
     new_slots = []
 
-    # group course keys by schedule id (shared schedule -> one fetch, split by name)
+    n_raw, n_named, n_window = 0, {"black": 0, "red": 0, "other": 0}, 0
+    sample_logged = False
+
     by_sched = {}
     for ckey in ("black", "red"):
         c = courses.get(ckey)
@@ -283,16 +286,24 @@ def scan(session, config, state, days_ahead):
             for raw in fetch_times(session, sched_id, bclasses, day):
                 if not isinstance(raw, dict):
                     continue
+                n_raw += 1
+                if not sample_logged:
+                    print("[scan] sample raw item: " + json.dumps(raw)[:400], flush=True)
+                    sample_logged = True
                 item_key = _course_key(raw.get("course_name") or raw.get("schedule_name"))
+                n_named[item_key if item_key in ("black", "red") else "other"] += 1
                 if len(ckeys) == 1 and item_key is None:
-                    ckey = ckeys[0]          # dedicated schedule, no name needed
+                    ckey = ckeys[0]
                 elif item_key in ckeys:
-                    ckey = item_key          # shared schedule, name decides
+                    ckey = item_key
                 else:
-                    continue                 # slot belongs to a course we don't track
-                slot = parse_slot(raw, ckey)
-                if not slot or slot["spots"] < 1 or not in_window(slot, windows):
                     continue
+                slot = parse_slot(raw, ckey)
+                if not slot or slot["spots"] < 1:
+                    continue
+                if not in_window(slot, windows):
+                    continue
+                n_window += 1
                 k = slot_key(slot)
                 prev_spots = state["seen"].get(k, 0)
                 if slot["spots"] > prev_spots:
@@ -300,6 +311,10 @@ def scan(session, config, state, days_ahead):
                     new_slots.append(slot)
                 state["seen"][k] = slot["spots"]
             time.sleep(0.4)
+
+    print(f"[scan] raw slots seen: {n_raw} "
+          f"(black {n_named['black']}, red {n_named['red']}, other {n_named['other']}) | "
+          f"in your windows: {n_window} | new since last pass: {len(new_slots)}", flush=True)
     return new_slots
 
 
