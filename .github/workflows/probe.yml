@@ -15,6 +15,9 @@ jobs:
         with: { python-version: "3.12" }
       - run: pip install -q requests pyyaml
       - name: discover courses (read the log below)
+        env:
+          FOREUP_COOKIE: ${{ secrets.FOREUP_COOKIE }}
+          FOREUP_JWT: ${{ secrets.FOREUP_JWT }}
         run: python monitor.py probe
       - name: persist discovery
         run: |
