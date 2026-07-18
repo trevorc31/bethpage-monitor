@@ -112,8 +112,8 @@ def _course_key(name):
 def _named_courses_from(entries):
     out = {}
     for e in entries:
-        name = str(e.get("name") or e.get("title") or e.get("course_name")
-                   or e.get("schedule_name") or "")
+        name = str(e.get("schedule_name") or e.get("name") or e.get("title")
+                   or e.get("course_name") or "")
         sid = str(e.get("schedule_id") or e.get("id") or e.get("teesheet_id") or "")
         key = _course_key(name)
         if sid and key:
@@ -318,7 +318,8 @@ def scan(session, config, state, days_ahead):
                 if not sample_logged:
                     print("[scan] sample raw item: " + json.dumps(raw)[:400], flush=True)
                     sample_logged = True
-                item_key = _course_key(raw.get("course_name") or raw.get("schedule_name"))
+                item_key = _course_key(
+                    f'{raw.get("schedule_name") or ""} {raw.get("course_name") or ""}')
                 n_named[item_key if item_key in n_named else "other"] = \
                     n_named.get(item_key if item_key in n_named else "other", 0) + 1
                 if len(ckeys) == 1 and item_key is None:
