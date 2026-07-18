@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import requests
 import yaml
 
+VERSION = "v2.2-schedule-names"
 ET = ZoneInfo("America/New_York")
 FACILITY_ID = "19765"
 BASE = "https://foreupsoftware.com/index.php"
@@ -297,6 +298,8 @@ def scan(session, config, state, days_ahead):
     n_named = {k: 0 for k in tracked}
     n_named["other"] = 0
     sample_logged = False
+    sched_names = {}
+    print(f"[scan] monitor {VERSION}", flush=True)
 
     by_sched = {}
     for ckey in tracked:
@@ -318,8 +321,9 @@ def scan(session, config, state, days_ahead):
                 if not sample_logged:
                     print("[scan] sample raw item: " + json.dumps(raw)[:400], flush=True)
                     sample_logged = True
-                item_key = _course_key(
-                    f'{raw.get("schedule_name") or ""} {raw.get("course_name") or ""}')
+                sn = str(raw.get("schedule_name") or "")
+                sched_names[sn] = sched_names.get(sn, 0) + 1
+                item_key = _course_key(f'{sn} {raw.get("course_name") or ""}')
                 n_named[item_key if item_key in n_named else "other"] = \
                     n_named.get(item_key if item_key in n_named else "other", 0) + 1
                 if len(ckeys) == 1 and item_key is None:
@@ -342,6 +346,10 @@ def scan(session, config, state, days_ahead):
                 state["seen"][k] = slot["spots"]
             time.sleep(0.4)
 
+    if sched_names:
+        top = sorted(sched_names.items(), key=lambda x: -x[1])[:15]
+        print("[scan] products seen: " +
+              "; ".join(f"{n or '(blank)'} x{c}" for n, c in top), flush=True)
     counts = ", ".join(f"{k} {v}" for k, v in n_named.items())
     print(f"[scan] raw slots seen: {n_raw} ({counts}) | "
           f"in your windows: {n_window} | new since last pass: {len(new_slots)}", flush=True)
