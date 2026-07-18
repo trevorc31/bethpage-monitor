@@ -39,7 +39,14 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Referer": f"{BASE}/booking/{FACILITY_ID}",
     "X-Requested-With": "XMLHttpRequest",
+    "Api-Key": "no_limits",
+    "X-Fu-Golfer-Location": "foreup",
 }
+
+# All Bethpage schedule ids, captured from a real logged-in browser request.
+ALL_SCHEDULES = ["2517", "2431", "2433", "2539", "2538", "2434", "2432", "2435"]
+# Booking class observed working in the resident browser session; tried first.
+PREFERRED_CLASSES = ["2138"]
 
 # Optional authenticated session: paste your browser's ForeUp cookie into the
 # FOREUP_COOKIE repo secret and availability requests run with your login.
@@ -163,10 +170,11 @@ def discover(session, config):
     day3 = (datetime.now(ET).date() + timedelta(days=3)).strftime("%m-%d-%Y")
     accessible = []
     for cid in cls_names:
-        params = {"time": "all", "date": day3, "holes": "all", "players": "0",
-                  "schedule_id": "2431", "schedule_ids[]": "2431",
-                  "specials_only": "0", "api_key": "no_limits",
-                  "booking_class": cid}
+        params = [("time", "all"), ("date", day3), ("holes", "all"),
+                  ("players", "0"), ("schedule_id", ALL_SCHEDULES[0])]
+        params += [("schedule_ids[]", s) for s in ALL_SCHEDULES]
+        params += [("specials_only", "0"), ("api_key", ""),
+                   ("booking_class", cid)]
         try:
             r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
             if r.ok:
@@ -174,7 +182,9 @@ def discover(session, config):
         except requests.RequestException:
             pass
         time.sleep(0.15)
-    note(f"B: accessible classes (HTTP 200): {accessible}")
+    accessible = [c for c in PREFERRED_CLASSES if c in accessible] + \
+                 [c for c in accessible if c not in PREFERRED_CLASSES]
+    note(f"B: accessible classes (HTTP 200, preferred first): {accessible}")
 
     # ---- build course mapping ----------------------------------------------
     found = {}
@@ -216,32 +226,33 @@ def get_discovery(session, config, state):
 # ----------------------------------------------------------------------------
 
 def fetch_times(session, schedule_id, booking_classes, day: date):
-    """Merged availability across the given booking classes for one day."""
+    """One aggregated request across ALL Bethpage schedules, mirroring the
+    real browser request. Preferred booking classes first; the first class
+    returning any items wins. [] only if every class comes back empty."""
     datestr = day.strftime("%m-%d-%Y")
-    merged, seen_keys = [], set()
-    for bc in (booking_classes or [None]):
-        params = {
-            "time": "all", "date": datestr, "holes": "all", "players": "0",
-            "schedule_id": schedule_id, "schedule_ids[]": schedule_id,
-            "specials_only": "0", "api_key": "no_limits",
-        }
+    ordered = [c for c in PREFERRED_CLASSES if c in (booking_classes or [])]
+    ordered += [c for c in (booking_classes or []) if c not in ordered]
+    if not ordered:
+        ordered = [None]
+    for bc in ordered:
+        params = [
+            ("time", "all"), ("date", datestr), ("holes", "all"),
+            ("players", "0"),
+            ("schedule_id", ALL_SCHEDULES[0]),
+        ]
+        params += [("schedule_ids[]", s) for s in ALL_SCHEDULES]
+        params += [("specials_only", "0"), ("api_key", "")]
         if bc:
-            params["booking_class"] = bc
+            params.append(("booking_class", bc))
         try:
             r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
             data = r.json() if r.ok else None
         except (requests.RequestException, ValueError):
             data = None
-        if isinstance(data, list):
-            for it in data:
-                if not isinstance(it, dict):
-                    continue
-                k = (it.get("time"), it.get("course_name") or it.get("schedule_name"))
-                if k not in seen_keys:
-                    seen_keys.add(k)
-                    merged.append(it)
-        time.sleep(0.1)
-    return merged
+        if isinstance(data, list) and data:
+            return [it for it in data if isinstance(it, dict)]
+        time.sleep(0.15)
+    return []
 
 
 def parse_slot(raw, course_key):
