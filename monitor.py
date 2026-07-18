@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 import requests
 import yaml
 
-VERSION = "v2.2-schedule-names"
+VERSION = "v2.3-per-schedule-sweep"
 ET = ZoneInfo("America/New_York")
 FACILITY_ID = "19765"
 BASE = "https://foreupsoftware.com/index.php"
@@ -226,34 +226,40 @@ def get_discovery(session, config, state):
 # availability
 # ----------------------------------------------------------------------------
 
-def fetch_times(session, schedule_id, booking_classes, day: date):
-    """One aggregated request across ALL Bethpage schedules, mirroring the
-    real browser request. Preferred booking classes first; the first class
-    returning any items wins. [] only if every class comes back empty."""
+def fetch_times(session, schedule_id_unused, booking_classes, day: date):
+    """Sweep every Bethpage schedule as the PRIMARY schedule_id (the API
+    ignores the schedule_ids[] array and only honors the primary), one call
+    per schedule, merged. Preferred booking class first; falls back per
+    schedule if a class is rejected."""
     datestr = day.strftime("%m-%d-%Y")
     ordered = [c for c in PREFERRED_CLASSES if c in (booking_classes or [])]
     ordered += [c for c in (booking_classes or []) if c not in ordered]
     if not ordered:
         ordered = [None]
-    for bc in ordered:
-        params = [
-            ("time", "all"), ("date", datestr), ("holes", "all"),
-            ("players", "0"),
-            ("schedule_id", ALL_SCHEDULES[0]),
-        ]
-        params += [("schedule_ids[]", s) for s in ALL_SCHEDULES]
-        params += [("specials_only", "0"), ("api_key", "")]
-        if bc:
-            params.append(("booking_class", bc))
-        try:
-            r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
-            data = r.json() if r.ok else None
-        except (requests.RequestException, ValueError):
-            data = None
-        if isinstance(data, list) and data:
-            return [it for it in data if isinstance(it, dict)]
-        time.sleep(0.15)
-    return []
+    merged = []
+    for sched in ALL_SCHEDULES:
+        for bc in ordered:
+            params = [
+                ("time", "all"), ("date", datestr), ("holes", "all"),
+                ("players", "0"), ("schedule_id", sched),
+                ("schedule_ids[]", sched),
+                ("specials_only", "0"), ("api_key", ""),
+            ]
+            if bc:
+                params.append(("booking_class", bc))
+            try:
+                r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
+                data = r.json() if r.ok else None
+            except (requests.RequestException, ValueError):
+                data = None
+            if isinstance(data, list):
+                for it in data:
+                    if isinstance(it, dict):
+                        it.setdefault("schedule_id", sched)
+                        merged.append(it)
+                break  # valid answer for this schedule (even if empty)
+        time.sleep(0.05)
+    return merged
 
 
 def parse_slot(raw, course_key):
