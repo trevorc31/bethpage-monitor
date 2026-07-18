@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 import requests
 import yaml
 
-VERSION = "v2.3-per-schedule-sweep"
+VERSION = "v2.4-18-hole-only"
 ET = ZoneInfo("America/New_York")
 FACILITY_ID = "19765"
 BASE = "https://foreupsoftware.com/index.php"
@@ -329,7 +329,10 @@ def scan(session, config, state, days_ahead):
                     sample_logged = True
                 sn = str(raw.get("schedule_name") or "")
                 sched_names[sn] = sched_names.get(sn, 0) + 1
-                item_key = _course_key(f'{sn} {raw.get("course_name") or ""}')
+                if "9 hole" in sn.lower() and not config.get("include_nine_hole_products"):
+                    item_key = None   # 9-hole products don't count as the course
+                else:
+                    item_key = _course_key(f'{sn} {raw.get("course_name") or ""}')
                 n_named[item_key if item_key in n_named else "other"] = \
                     n_named.get(item_key if item_key in n_named else "other", 0) + 1
                 if len(ckeys) == 1 and item_key is None:
