@@ -1,17 +1,18 @@
 name: drop-race
 on:
   schedule:
-    # Four independent attempts spread across the 30 min before 7pm ET.
-    # GitHub cron can silently skip a single trigger (common right after a
-    # workflow is first added) -- staggering makes that far less likely to
-    # cost us the whole window. Only the earliest one that actually starts
-    # does the real sleep+poll; the rest queue behind it (see concurrency
-    # group below) and no-op in ~1s once they see the window has passed.
-    - cron: "20 22 * * *"   # 6:20 pm EDT
+    # Six staggered triggers from 5:45pm ET. GitHub delayed every trigger by
+    # 20-45 min on a busy Saturday, so the ladder starts far earlier; the
+    # script sleeps until 6:59:30pm ET no matter which rung actually starts.
+    - cron: "45 21 * * *"   # 5:45 pm EDT
+    - cron: "0 22 * * *"    # 6:00 pm EDT
+    - cron: "15 22 * * *"   # 6:15 pm EDT
     - cron: "30 22 * * *"   # 6:30 pm EDT
     - cron: "40 22 * * *"   # 6:40 pm EDT
     - cron: "50 22 * * *"   # 6:50 pm EDT
-    - cron: "20 23 * * *"   # 6:20 pm EST
+    - cron: "45 22 * * *"   # 5:45 pm EST
+    - cron: "0 23 * * *"    # 6:00 pm EST
+    - cron: "15 23 * * *"   # 6:15 pm EST
     - cron: "30 23 * * *"   # 6:30 pm EST
     - cron: "40 23 * * *"   # 6:40 pm EST
     - cron: "50 23 * * *"   # 6:50 pm EST
@@ -27,7 +28,7 @@ permissions:
 jobs:
   droprace:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
