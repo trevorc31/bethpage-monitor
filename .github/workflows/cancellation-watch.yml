@@ -1,7 +1,6 @@
 name: cancellation-watch
 on:
   schedule:
-    # every 15 min; hours chosen to span 6am-10pm ET across EDT/EST.
     - cron: "*/15 10-23 * * *"
     - cron: "*/15 0-3 * * *"
   workflow_dispatch: {}
@@ -24,9 +23,13 @@ jobs:
       - run: pip install -q requests pyyaml
       - name: guard ET hours
         run: |
-          H=$(TZ=America/New_York date +%H)
-          if [ "$H" -lt 6 ] || [ "$H" -ge 22 ]; then
-            echo "outside 6am-10pm ET, skipping"; echo "SKIP=1" >> $GITHUB_ENV
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "manual run - guard bypassed"
+          else
+            H=$(TZ=America/New_York date +%H)
+            if [ "$H" -lt 6 ] || [ "$H" -ge 22 ]; then
+              echo "outside 6am-10pm ET, skipping"; echo "SKIP=1" >> $GITHUB_ENV
+            fi
           fi
       - name: run watch pass
         if: env.SKIP != '1'
