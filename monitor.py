@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 import requests
 import yaml
 
-VERSION = "v2.4-18-hole-only"
+VERSION = "v3.0-course-map"
 ET = ZoneInfo("America/New_York")
 FACILITY_ID = "19765"
 BASE = "https://foreupsoftware.com/index.php"
@@ -44,10 +44,14 @@ HEADERS = {
     "X-Fu-Golfer-Location": "foreup",
 }
 
-# All Bethpage schedule ids, captured from a real logged-in browser request.
+# Per-course primary schedule + resident booking class, captured from real
+# logged-in browser requests (one per course).
+COURSE_MAP = {
+    "black": {"schedule_id": "2431", "booking_class": "2136"},
+    "red":   {"schedule_id": "2432", "booking_class": "2138"},
+    "blue":  {"schedule_id": "2433", "booking_class": "2140"},
+}
 ALL_SCHEDULES = ["2517", "2431", "2433", "2539", "2538", "2434", "2432", "2435"]
-# Booking class observed working in the resident browser session; tried first.
-PREFERRED_CLASSES = ["2138"]
 
 # Optional authenticated session: paste your browser's ForeUp cookie into the
 # FOREUP_COOKIE repo secret and availability requests run with your login.
@@ -226,40 +230,28 @@ def get_discovery(session, config, state):
 # availability
 # ----------------------------------------------------------------------------
 
-def fetch_times(session, schedule_id_unused, booking_classes, day: date):
-    """Sweep every Bethpage schedule as the PRIMARY schedule_id (the API
-    ignores the schedule_ids[] array and only honors the primary), one call
-    per schedule, merged. Preferred booking class first; falls back per
-    schedule if a class is rejected."""
+def fetch_times(session, course_key, day: date, cmap=None):
+    """One request for one course, using its own primary schedule and resident
+    booking class — an exact mirror of the browser request for that course."""
+    m = (cmap or COURSE_MAP).get(course_key)
+    if not m:
+        return []
     datestr = day.strftime("%m-%d-%Y")
-    ordered = [c for c in PREFERRED_CLASSES if c in (booking_classes or [])]
-    ordered += [c for c in (booking_classes or []) if c not in ordered]
-    if not ordered:
-        ordered = [None]
-    merged = []
-    for sched in ALL_SCHEDULES:
-        for bc in ordered:
-            params = [
-                ("time", "all"), ("date", datestr), ("holes", "all"),
-                ("players", "0"), ("schedule_id", sched),
-                ("schedule_ids[]", sched),
-                ("specials_only", "0"), ("api_key", ""),
-            ]
-            if bc:
-                params.append(("booking_class", bc))
-            try:
-                r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
-                data = r.json() if r.ok else None
-            except (requests.RequestException, ValueError):
-                data = None
-            if isinstance(data, list):
-                for it in data:
-                    if isinstance(it, dict):
-                        it.setdefault("schedule_id", sched)
-                        merged.append(it)
-                break  # valid answer for this schedule (even if empty)
-        time.sleep(0.05)
-    return merged
+    params = [
+        ("time", "all"), ("date", datestr), ("holes", "all"), ("players", "0"),
+        ("booking_class", m["booking_class"]),
+        ("schedule_id", m["schedule_id"]),
+    ]
+    params += [("schedule_ids[]", s) for s in ALL_SCHEDULES]
+    params += [("specials_only", "0"), ("api_key", "")]
+    try:
+        r = session.get(TIMES_API, params=params, headers=HEADERS, timeout=15)
+        data = r.json() if r.ok else None
+    except (requests.RequestException, ValueError):
+        data = None
+    if isinstance(data, list):
+        return [it for it in data if isinstance(it, dict)]
+    return []
 
 
 def parse_slot(raw, course_key):
@@ -292,58 +284,46 @@ def slot_key(slot):
 
 
 def scan(session, config, state, days_ahead):
-    """One full pass over all tracked courses with per-course windows."""
-    disc = get_discovery(session, config, state)
-    dcourses = disc["courses"]
+    """One pass: for each configured course, query its own schedule+class for
+    each in-window day. Slots belong to the course we asked for; the
+    schedule_name census stays as a diagnostic."""
     ccfg = config["courses"]
-    tracked = [k for k in ccfg if k in dcourses]
+    cmap = {k: {**COURSE_MAP.get(k, {}), **{kk: vv for kk, vv in (ccfg[k] or {}).items()
+                if kk in ("schedule_id", "booking_class") and vv}}
+            for k in ccfg}
+    tracked = [k for k in ccfg if cmap.get(k, {}).get("schedule_id")]
     today = datetime.now(ET).date()
     new_slots = []
 
     n_raw, n_window = 0, 0
     n_named = {k: 0 for k in tracked}
-    n_named["other"] = 0
-    sample_logged = False
     sched_names = {}
+    sample_logged = False
     print(f"[scan] monitor {VERSION}", flush=True)
 
-    by_sched = {}
     for ckey in tracked:
-        c = dcourses[ckey]
-        gk = (str(c["schedule_id"]), tuple(c.get("booking_classes") or []))
-        by_sched.setdefault(gk, []).append(ckey)
-
-    for (sched_id, bclasses_t), ckeys in by_sched.items():
-        bclasses = list(bclasses_t)
         for offset in days_ahead:
             day = today + timedelta(days=offset)
-            dayname = day.strftime("%A").lower()
-            if not any(dayname in ccfg[k]["windows"] for k in ckeys):
+            if day.strftime("%A").lower() not in ccfg[ckey]["windows"]:
                 continue
-            for raw in fetch_times(session, sched_id, bclasses, day):
-                if not isinstance(raw, dict):
-                    continue
+            for raw in fetch_times(session, ckey, day, cmap):
                 n_raw += 1
+                sn = str(raw.get("schedule_name") or "")
+                sched_names[sn] = sched_names.get(sn, 0) + 1
                 if not sample_logged:
                     print("[scan] sample raw item: " + json.dumps(raw)[:400], flush=True)
                     sample_logged = True
-                sn = str(raw.get("schedule_name") or "")
-                sched_names[sn] = sched_names.get(sn, 0) + 1
+                # only count slots that are actually this course's product
+                # (the API sometimes returns sibling-schedule rows)
+                item_key = _course_key(sn)
+                if item_key is not None and item_key != ckey:
+                    continue
                 if "9 hole" in sn.lower() and not config.get("include_nine_hole_products"):
-                    item_key = None   # 9-hole products don't count as the course
-                else:
-                    item_key = _course_key(f'{sn} {raw.get("course_name") or ""}')
-                n_named[item_key if item_key in n_named else "other"] = \
-                    n_named.get(item_key if item_key in n_named else "other", 0) + 1
-                if len(ckeys) == 1 and item_key is None:
-                    ckey = ckeys[0]
-                elif item_key in ckeys:
-                    ckey = item_key
-                else:
                     continue
                 slot = parse_slot(raw, ckey)
                 if not slot or slot["spots"] < 1:
                     continue
+                n_named[ckey] += 1
                 if not in_window(slot, ccfg[ckey]["windows"]):
                     continue
                 n_window += 1
@@ -353,14 +333,14 @@ def scan(session, config, state, days_ahead):
                     slot["new_group"] = slot["spots"] >= 2 and prev_spots < 2
                     new_slots.append(slot)
                 state["seen"][k] = slot["spots"]
-            time.sleep(0.4)
+            time.sleep(0.2)
 
     if sched_names:
         top = sorted(sched_names.items(), key=lambda x: -x[1])[:15]
         print("[scan] products seen: " +
               "; ".join(f"{n or '(blank)'} x{c}" for n, c in top), flush=True)
     counts = ", ".join(f"{k} {v}" for k, v in n_named.items())
-    print(f"[scan] raw slots seen: {n_raw} ({counts}) | "
+    print(f"[scan] raw rows: {n_raw} | usable per course: ({counts}) | "
           f"in your windows: {n_window} | new since last pass: {len(new_slots)}", flush=True)
     return new_slots
 
@@ -437,7 +417,7 @@ def run_droprace(config, state, session):
     if now > drop + timedelta(minutes=10):
         drop += timedelta(days=1)
     warm = drop - timedelta(seconds=30)
-    if warm - now > timedelta(minutes=42):
+    if warm - now > timedelta(minutes=80):
         print(f"not within drop window (now {now:%H:%M} ET); exiting to save minutes")
         return
     # the day that unlocks at this drop: resident window = 7 days ahead
@@ -456,7 +436,7 @@ def run_droprace(config, state, session):
         print(f"sleeping {wait:.0f}s until 30s before {drop:%H:%M} ET drop")
         time.sleep(wait)
 
-    deadline = drop + timedelta(minutes=6)
+    deadline = drop + timedelta(minutes=10)
     print(f"drop-race polling for {target_day} until {deadline:%H:%M:%S} ET")
     while datetime.now(ET) < deadline:
         new_slots = scan(session, config, state, [target_offset])
