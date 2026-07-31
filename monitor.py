@@ -436,7 +436,7 @@ def run_droprace(config, state, session):
         print(f"sleeping {wait:.0f}s until 30s before {drop:%H:%M} ET drop")
         time.sleep(wait)
 
-    deadline = drop + timedelta(minutes=10)
+    deadline = drop + timedelta(minutes=config.get("droprace_end_minutes", 20))
     print(f"drop-race polling for {target_day} until {deadline:%H:%M:%S} ET")
     while datetime.now(ET) < deadline:
         new_slots = scan(session, config, state, [target_offset])
